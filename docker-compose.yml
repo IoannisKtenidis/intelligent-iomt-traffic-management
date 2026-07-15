@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  simulator:
+    build: .
+    image: lora-simulator:latest
+    container_name: lora_sim_container
+    volumes:
+      # Mount results and figures so generated data is written back to your host machine
+      - ./Results_Data:/app/Results_Data
+      - ./Figures:/app/Figures
+      # Mount core code to allow running training or modification without rebuilding image
+      - ./Core_Code:/app/Core_Code
+      - ./Execution_Scripts:/app/Execution_Scripts
+    # Default execution command. Can be overridden in command line.
+    command: python Execution_Scripts/run_all_scenarios.py

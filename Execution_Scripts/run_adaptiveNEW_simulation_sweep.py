@@ -1,0 +1,214 @@
+import subprocess
+import re
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
+import shutil
+
+# Simulation parameters
+node_counts = [500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000]
+avg_send = 1000000       # average sending interval (ms)
+simtime = 86400000        # 24 hours in ms
+collision = 0             # Simplified collision check
+k_intervals = 3           # K=3 feature window
+iterations = 100          # 100 Monte Carlo runs per configuration
+scenario_id = 1           # Scenario 1 (p=0.018, q=0.764)
+experiment_id = 3         # Adaptive SF setup
+
+scripts = {
+    "ALOHA": "../Core_Code/loraDir - ALOHA.py",
+    "Classifier_LBT_70": "../Core_Code/loraDir - Classifier LBT.py",
+    "Classifier_LBT_100": "../Core_Code/loraDir - Classifier LBT.py"
+}
+
+output_dir = "../Results_Data/adaptiveNEW"
+os.makedirs(output_dir, exist_ok=True)
+
+def run_single_sim(task):
+    approach, nodes, iter_idx = task
+    script_file = scripts[approach]
+    
+    # Set environment variables for the subprocess to control fallback
+    env = os.environ.copy()
+    if approach == "Classifier_LBT_100":
+        env["FORCE_IDEAL_CLASSIFIER"] = "1"
+    else:
+        env["FORCE_IDEAL_CLASSIFIER"] = "0"
+
+    cmd = [
+        "python", script_file,
+        str(nodes), str(avg_send), str(experiment_id), str(simtime),
+        str(collision), str(scenario_id), str(k_intervals)
+    ]
+    
+    try:
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600, env=env)
+        stdout = process.stdout
+        
+        # Parse DER method 2
+        der_match = re.search(r"DER method 2:\s*([\d\.]+)", stdout)
+        if der_match:
+            return float(der_match.group(1))
+        else:
+            der_match_1 = re.search(r"DER:\s*([\d\.]+)", stdout)
+            if der_match_1:
+                return float(der_match_1.group(1))
+            return None
+    except Exception as e:
+        print(f"Error running {script_file} (approach={approach}, nodes={nodes}, iter={iter_idx}): {e}")
+        return None
+
+def main():
+    print("=====================================================================")
+    print(f"   LAUNCHING ADAPTIVE SF REAL SIMULATION Sweep (Up to 12000 Nodes)")
+    print("=====================================================================")
+    
+    raw_path = os.path.join(output_dir, "adaptive_comparison_raw.csv")
+    
+    # Read existing completed runs to support resuming
+    completed_counts = {}
+    if os.path.exists(raw_path):
+        try:
+            df_existing = pd.read_csv(raw_path)
+            if all(col in df_existing.columns for col in ['Approach', 'Nodes', 'DER']):
+                counts = df_existing.groupby(['Approach', 'Nodes']).size().to_dict()
+                completed_counts = counts
+                print(f"Loaded existing raw results. Already completed runs:")
+                for (app, nds), cnt in completed_counts.items():
+                    print(f"  {app} with {nds} nodes: {cnt}/{iterations} runs")
+        except Exception as e:
+            print(f"Warning: Could not read existing raw results for resume: {e}")
+
+    tasks = []
+    # Build list of only the remaining runs
+    for approach in scripts.keys():
+        for nodes in node_counts:
+            done = completed_counts.get((approach, nodes), 0)
+            remaining = max(0, iterations - done)
+            for i in range(remaining):
+                tasks.append((approach, nodes, done + i))
+                        
+    total_tasks = len(tasks)
+    print(f"Total remaining simulation runs to execute: {total_tasks}")
+    
+    if total_tasks == 0:
+        print("All runs are already completed!")
+    else:
+        # Run in parallel using ProcessPoolExecutor
+        cpu_count = os.cpu_count() or 4
+        # Cap workers at 22 to utilize the 24-core CPU and run the sweep faster
+        max_workers = min(22, max(1, cpu_count - 2))
+        print(f"Running in parallel using {max_workers} CPU workers...")
+        
+        completed = 0
+        start_time = time.time()
+        
+        file_exists = os.path.exists(raw_path)
+        # Open in append mode
+        with open(raw_path, "a" if file_exists else "w", encoding="utf-8") as csv_file:
+            if not file_exists:
+                csv_file.write("Approach,Nodes,DER\n")
+            
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(run_single_sim, task): task for task in tasks}
+                
+                for future in as_completed(futures):
+                    task = futures[future]
+                    approach, nodes, iter_idx = task
+                    der = future.result()
+                    
+                    completed += 1
+                    if der is not None:
+                        csv_file.write(f"{approach},{nodes},{der}\n")
+                        csv_file.flush()
+                    
+                    # Progress reporting
+                    if completed % 50 == 0 or completed == total_tasks:
+                        elapsed = time.time() - start_time
+                        est_total = (elapsed / completed) * total_tasks
+                        est_rem = est_total - elapsed
+                        print(f"Progress: {completed}/{total_tasks} runs completed ({completed/total_tasks*100:.1f}%). "
+                              f"Elapsed: {elapsed/60:.1f}m. Est. Remaining: {est_rem/60:.1f}m.")
+                              
+        print(f"\nAll simulations completed in {(time.time() - start_time)/60:.2f} minutes.")
+    
+    # Load all completed raw data to calculate averages and pivot
+    if os.path.exists(raw_path):
+        df_raw = pd.read_csv(raw_path)
+        
+        # Calculate Averages (group by Approach, Nodes)
+        df_grouped = df_raw.groupby(["Approach", "Nodes"])["DER"].mean().reset_index()
+        averages_path = os.path.join(output_dir, "adaptive_comparison_averages.csv")
+        df_grouped.to_csv(averages_path, index=False)
+        print(f"Averages saved to {averages_path}")
+        
+        # Pivot to make it easy to plot / read
+        df_pivot = df_grouped.pivot(index="Nodes", columns="Approach", values="DER").reset_index()
+        pivoted_path = os.path.join(output_dir, "adaptive_comparison_pivoted.csv")
+        df_pivot.to_csv(pivoted_path, index=False)
+        print(f"Pivoted averages saved to {pivoted_path}")
+        print(df_pivot)
+        
+        # Generate Plots
+        colors = {
+            "ALOHA": "#d9534f",               # Crimson Red
+            "Classifier_LBT_70": "#5cb85c",   # Emerald Green
+            "Classifier_LBT_100": "#0275d8"   # Royal Blue
+        }
+        
+        labels = {
+            "ALOHA": "Standard Aloha",
+            "Classifier_LBT_70": "ML Classifier + LBT",
+            "Classifier_LBT_100": '"Ideal" Classifier + LBT'
+        }
+        
+        plt.figure(figsize=(9.5, 7))
+        for approach in ["ALOHA", "Classifier_LBT_70", "Classifier_LBT_100"]:
+            if approach in df_pivot.columns:
+                plt.plot(
+                    df_pivot["Nodes"], df_pivot[approach], 
+                    marker='^' if approach == "ALOHA" else 'o' if approach == "Classifier_LBT_70" else 's',
+                    linestyle='--' if approach == "ALOHA" else '-.' if approach == "Classifier_LBT_70" else '-',
+                    color=colors[approach], linewidth=2.5, markersize=9,
+                    label=labels[approach]
+                )
+                
+        plt.title('Adaptive SF Configuration: ALOHA vs. ML Classifier + LBT vs. Ideal Classifier + LBT\nHome Scenario (Scenario 1, p=0.018, q=0.764)', fontsize=14, fontweight='bold', pad=15)
+        plt.xlabel('Number of End-Nodes', fontsize=13, labelpad=10)
+        plt.ylabel('Data Extraction Rate (DER Fraction)', fontsize=13, labelpad=10)
+        plt.xticks(fontsize=12)
+        plt.yticks(fontsize=12)
+        
+        plt.grid(True, linestyle=':', alpha=0.6, color='#999999')
+        plt.legend(fontsize=12, loc='lower left')
+        
+        plt.ylim(0.5, 1.02)
+        plt.xlim(0, 12500)
+        
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+        
+        plot_filename = os.path.join(output_dir, "fig_adaptive_comparison.png")
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved plot: {plot_filename}")
+        
+        # Also save a copy in the root folder
+        root_plot_path = "../Figures/fig_"
+        shutil.copy(plot_filename, root_plot_path)
+        print(f"Saved copy in root folder: {root_plot_path}")
+        
+        # Copy to brain directory for artifact viewing
+        brain_dir = r"C:\Users\jokte\.gemini\antigravity\brain\3dc26943-42c0-4305-8918-827f1ca989c4"
+        if os.path.exists(brain_dir):
+            brain_plot_path = os.path.join(brain_dir, "fig_adaptive_comparison.png")
+            shutil.copy(plot_filename, brain_plot_path)
+            print(f"Copied plot to brain directory: {brain_plot_path}")
+            
+        plt.close()
+
+if __name__ == "__main__":
+    main()
