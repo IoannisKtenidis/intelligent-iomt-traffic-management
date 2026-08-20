@@ -10,7 +10,9 @@ services:
       - ./Results_Data:/app/Results_Data
       - ./Figures:/app/Figures
       # Mount core code to allow running training or modification without rebuilding image
-      - ./Core_Code:/app/Core_Code
-      - ./Execution_Scripts:/app/Execution_Scripts
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./data:/app/data
+      - ./models:/app/models
     # Default execution command. Can be overridden in command line.
-    command: python Execution_Scripts/run_all_scenarios.py
+    command: python scripts/run_all_scenarios.py

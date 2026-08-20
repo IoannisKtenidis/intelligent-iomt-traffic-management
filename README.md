@@ -111,7 +111,7 @@ docker-compose down --rmi all
 ---
 
 ## Configuration
-Custom options are configured in the simulation scripts under `Core_Code/` or passed via command-line arguments to the runners under `Execution_Scripts/`:
+Custom options are configured in the simulation scripts under `src/core/` or passed via command-line arguments to the runners under `scripts/`:
 
 1. **Patient Transitions**: Parameters $p$ and $q$ in the simulator files represent the transition probabilities from Healthy $\rightarrow$ Not-Healthy and vice versa:
    * **Scenario 1**: $p = 0.018$, $q = 0.764$ (Remote Home Monitoring)
@@ -127,13 +127,13 @@ Custom options are configured in the simulation scripts under `Core_Code/` or pa
 
 ## Usage & Examples
 
-All simulation runner scripts are located in `Execution_Scripts/`.
+All simulation runner scripts are located in `scripts/`.
 
 ### 1. Run Complete Simulation Sweep (Standard ALOHA vs. LBT)
 Executes the simulation across all node counts for all three scenarios:
 ```bash
 # Local execution
-python Execution_Scripts/run_all_scenarios.py
+python scripts/run_all_scenarios.py
 
 # Docker execution
 docker-compose up
@@ -143,20 +143,20 @@ docker-compose up
 Runs 10 Monte Carlo iterations per configuration to calculate statistical averages:
 ```bash
 # Local execution
-python Execution_Scripts/run_parallel_monte_carlo.py
+python scripts/run_parallel_monte_carlo.py
 
 # Docker execution
-docker-compose run --rm simulator python Execution_Scripts/run_parallel_monte_carlo.py
+docker-compose run --rm simulator python scripts/run_parallel_monte_carlo.py
 ```
 
 ### 3. Train XGBoost Classifier
 Generates training datasets and re-trains the models for different $K$ values:
 ```bash
 # 1. Collect dataset logs
-python Core_Code/collect_data.py
+python src/core/collect_data.py
 
 # 2. Train XGBoost models
-python Core_Code/train_xgboost.py
+python src/core/train_xgboost.py
 ```
 
 ---

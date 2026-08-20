@@ -19,4 +19,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Default command: Runs the scenario comparison
-CMD ["python", "Execution_Scripts/run_all_scenarios.py"]
+CMD ["python", "scripts/run_all_scenarios.py"]

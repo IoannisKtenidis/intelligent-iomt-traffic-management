@@ -1,7 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
- LoRaSim 0.2.1: simulate collisions in LoRa (Plain LBT Configuration)
+ LoRaSim 0.2.1: simulate collisions in LoRa
+ Copyright © 2016 Thiemo Voigt <thiemo@sics.se> and Martin Bor <m.bor@lancaster.ac.uk>
+
+ This work is licensed under the Creative Commons Attribution 4.0
+ International License. To view a copy of this license,
+ visit http://creativecommons.org/licenses/by/4.0/.
+
+ Do LoRa Low-Power Wide-Area Networks Scale? Martin Bor, Utz Roedig, Thiemo Voigt
+ and Juan Alonso, MSWiM '16, http://dx.doi.org/10.1145/2988287.2989163
+
+ $Date: 2017-05-12 19:16:16 +0100 (Fri, 12 May 2017) $
+ $Revision: 334 $
+"""
+
+"""
+ SYNOPSIS:
+    ./loraDir.py <nodes> <avgsend> <experiment> <simtime> [collision]
+ DESCRIPTION:
+    nodes
+        number of nodes to simulate
+    avgsend
+        average sending interval in milliseconds
+    experiment
+        experiment is an integer that determines with what radio settings the
+        simulation is run. All nodes are configured with a fixed transmit power
+        and a single transmit frequency, unless stated otherwise.
+        0   use the settings with the slowest datarate (SF12, BW125, CR4/8).
+        1   similar to experiment 0, but use a random choice of 3 transmit
+            frequencies.
+        2   use the settings with the fastest data rate (SF6, BW500, CR4/5).
+        3   optimise the setting per node based on the distance to the gateway.
+        4   use the settings as defined in LoRaWAN (SF12, BW125, CR4/5).
+        5   similar to experiment 3, but also optimises the transmit power.
+    simtime
+        total running time in milliseconds
+    collision
+        set to 1 to enable the full collision check, 0 to use a simplified check.
+        With the simplified check, two messages collide when they arrive at the
+        same time, on the same frequency and spreading factor. The full collision
+        check considers the 'capture effect', whereby a collision of one or the
+ OUTPUT
+     The result of every simulation run will be appended to a file named expX.dat,
+     whereby X is the experiment number. The file contains a space separated table
+     of values for nodes, collisions, transmissions and total energy spent. The
+     data file can be easily plotted using e.g. gnuplot.
 """
 
 import simpy
@@ -9,14 +53,8 @@ import random
 import numpy as np
 import math
 import sys
+import matplotlib.pyplot as plt
 import os
-
-# Mute verbose print statements to speed up execution
-_orig_print = print
-def print(*args, **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if any(k in msg for k in ["nrCollisions", "energy", "sent", "collisions", "received", "processed", "lost", "deferred", "DER", "Classifier", "TP:", "Sensitivity", "Specificity", "Accuracy", "---", "Error:", "usage:"]):
-        _orig_print(*args, **kwargs)
 
 # turn on/off graphics
 graphics = 0
@@ -25,7 +63,17 @@ graphics = 0
 full_collision = False
 
 # Scenario Selection: 1, 2, or 3
+# Scenario 1: p = 0.018, q = 0.764
+# Scenario 2: p = 0.020, q = 0.849
+# Scenario 3: p = 0.022, q = 0.934
 scenario = 1
+
+# Number of intervals to use as features (1, 2, 3, or 4)
+k_intervals = 3
+
+# Enable/disable Listen-Before-Talk (LBT) mechanism (True for proposed, False for ALOHA baseline)
+use_lbt = True
+
 
 if scenario == 1:
     p_trans = 0.018
@@ -41,31 +89,30 @@ else:
     sys.exit(-1)
 
 print(f"Selected Scenario: {scenario} (p = {p_trans}, q = {q_trans})")
-
-# Number of intervals to use as features (1, 2, 3, or 4)
-k_intervals = 3
+print(f"Features count (K-intervals): {k_intervals}")
 
 # Load XGBoost model
 import xgboost as xgb
-xgb_model = None
+model_file = os.path.join(os.path.dirname(__file__), "..", "..", "models", f"xgb_model_scenario{scenario}_k{k_intervals}.json")
+xgb_model = xgb.XGBClassifier()
+if os.path.exists(model_file):
+    xgb_model.load_model(model_file)
+    print(f"Loaded XGBoost model: {model_file}")
+else:
+    print(f"Warning: Model file {model_file} not found. Running with true-state fallback.")
+    xgb_model = None
 
-def load_xgboost_model():
-    """
-    Loads the XGBoost classifier from a JSON file based on the selected scenario
-    and K intervals. If the model file does not exist, falls back to the true state.
-    """
-    global xgb_model
-    model_file = os.path.join(os.path.dirname(__file__), f"xgb_model_scenario{scenario}_k{k_intervals}.json")
-    xgb_model = xgb.XGBClassifier()
-    if os.path.exists(model_file):
-        xgb_model.load_model(model_file)
-        print(f"Loaded XGBoost model: {model_file}")
-    else:
-        print(f"Warning: Model file {model_file} not found. Running with true-state fallback.")
-        xgb_model = None
 
-load_xgboost_model()
 
+# experiments:
+# 0: packet with longest airtime, aloha-style experiment
+# 0: one with 3 frequencies, 1 with 1 frequency
+# 2: with shortest packets, still aloha-style
+# 3: with shortest possible packets depending on distance
+
+
+# this is an array with measured values for sensitivity
+# see paper, Table 3
 sf7 = np.array([7,-126.5,-124.25,-120.75])
 sf8 = np.array([8,-127.25,-126.75,-124.0])
 sf9 = np.array([9,-131.25,-128.25,-127.5])
@@ -73,6 +120,7 @@ sf10 = np.array([10,-132.75,-130.25,-128.75])
 sf11 = np.array([11,-134.5,-132.75,-128.75])
 sf12 = np.array([12,-133.25,-132.25,-132.25])
 
+# Note: called before a packet (or rather node) is inserted into the list
 def checkcollision(packet):
     """
     Checks if the given packet collides with any other packets currently being
@@ -84,11 +132,9 @@ def checkcollision(packet):
     Returns:
         int: 1 if a collision occurred that ruins this packet, 0 otherwise.
     """
-    col = 0
+    col = 0 # flag needed since there might be several collisions for packet
     processing = 0
-    
-    # Count how many packets are currently being successfully processed
-    for i in range(0, len(packetsAtBS)):
+    for i in range(0,len(packetsAtBS)):
         if packetsAtBS[i].packet.processed == 1:
             processing = processing + 1
             
@@ -125,7 +171,7 @@ def checkcollision(packet):
                    else:
                        # Simplified collision model: overlapping packets on same SF/freq always collide
                        packet.collided = 1
-                       other.packet.collided = 1
+                       other.packet.collided = 1  # other also got lost
                        col = 1
         return col
     return 0
@@ -171,10 +217,10 @@ def powerCollision(p1, p2):
     Returns:
         tuple: Packets that collided/failed.
     """
-    powerThreshold = 6
+    powerThreshold = 6 # dB
     print("pwr: node {0.nodeid} {0.rssi:3.2f} dBm node {1.nodeid} {1.rssi:3.2f} dBm; diff {2:3.2f} dBm".format(p1, p2, round(p1.rssi - p2.rssi,2)))
     if abs(p1.rssi - p2.rssi) < powerThreshold:
-        # Both packets are within 6 dB, so both are lost
+        # Both packets are within 6 dB, so both collide
         print("collision pwr both node {} and node {}".format(p1.nodeid, p2.nodeid))
         return (p1, p2)
     elif p1.rssi - p2.rssi < powerThreshold:
@@ -216,9 +262,9 @@ def airtime(sf, cr, pl, bw):
         pl (int): Payload size in bytes
         bw (int): Bandwidth in kHz (125, 250, 500)
     """
-    H = 0     # Implicit header mode (0 = disabled, 1 = enabled)
-    DE = 0    # Low Data Rate Optimization (0 = disabled, 1 = enabled)
-    Npream = 8
+    H = 0        # implicit header disabled (H=0) or not (H=1)
+    DE = 0       # low data rate optimization enabled (=1) or not (=0)
+    Npream = 8   # number of preamble symbol (12.25  from Utz paper)
 
     # Low data rate optimization is mandatory for SF11 & SF12 with BW125
     if bw == 125 and sf in [11, 12]:
@@ -234,6 +280,9 @@ def airtime(sf, cr, pl, bw):
     Tpayload = payloadSymbNB * Tsym
     return Tpream + Tpayload
 
+#
+# this function creates a node
+#
 class myNode():
     def __init__(self, nodeid, bs, period, packetlen):
         self.nodeid = nodeid
@@ -242,49 +291,88 @@ class myNode():
         self.x = 0
         self.y = 0
 
-        a = random.random()
-        b = random.random()
-        if b<a:
-            a,b = b,a
-        self.x = b*maxDist*math.cos(2*math.pi*a/b)+bsx
-        self.y = b*maxDist*math.sin(2*math.pi*a/b)+bsy
+        # this is very complex procedure for placing nodes
+        # and ensure minimum distance between each pair of nodes
+        found = 0
+        rounds = 0
+        global nodes
+        while (found == 0 and rounds < 100):
+            a = random.random()
+            b = random.random()
+            if b<a:
+                a,b = b,a
+            posx = b*maxDist*math.cos(2*math.pi*a/b)+bsx
+            posy = b*maxDist*math.sin(2*math.pi*a/b)+bsy
+            if len(nodes) > 0:
+                for index, n in enumerate(nodes):
+                    dist = np.sqrt(((abs(n.x-posx))**2)+((abs(n.y-posy))**2))
+                    if dist >= 10:
+                        found = 1
+                        self.x = posx
+                        self.y = posy
+                    else:
+                        rounds = rounds + 1
+                        if rounds == 100:
+                            print("could not place new node, giving up")
+                            exit(-1)
+            else:
+                print("first node")
+                self.x = posx
+                self.y = posy
+                found = 1
         self.dist = np.sqrt((self.x-bsx)*(self.x-bsx)+(self.y-bsy)*(self.y-bsy))
         print('node %d' %nodeid, "x", self.x, "y", self.y, "dist: ", self.dist)
 
         self.packet = myPacket(self.nodeid, packetlen, self.dist)
         self.sent = 0
 
-        # Initialize state and history following Markov Chain transitions
-        state_temp = 'Healthy' if random.random() < (q_trans / (p_trans + q_trans)) else 'Not-Healthy'
+        # IoMT Markov state: Healthy (Routine) or Not-Healthy (Critical)
+        # Initialized based on stationary probabilities: q / (p + q)
+        self.state = 'Healthy' if random.random() < (q_trans / (p_trans + q_trans)) else 'Not-Healthy'
+        
+        # History of recent transmission intervals (in ms)
+        # Initialize with representative intervals for the initial state
         self.interval_history = []
         for _ in range(k_intervals):
-            if state_temp == 'Healthy':
-                if random.random() < p_trans:
-                    state_temp = 'Not-Healthy'
-            else:
-                if random.random() < q_trans:
-                    state_temp = 'Healthy'
-            
-            if state_temp == 'Healthy':
+            if self.state == 'Healthy':
                 lam = 1.96
             else:
                 lam = 2.72 if random.random() < 0.257 else 12.0
             self.interval_history.append(random.expovariate(lam / 86400000.0))
         
-        self.state = state_temp
+        # Predicted state using the model or fallback
         self.predicted_state = self.classify_state()
 
     def classify_state(self):
+        """
+        Classifies the current state of the node (Healthy vs Not-Healthy) using 
+        the loaded XGBoost model based on the recent interval history.
+        If no model is available, falls back to the true state.
+        """
         global xgb_model
         if xgb_model is not None:
-            # Reverse interval history to match training feature order (newest first)
+            # Reverse interval history to match training feature order (newest first, i.e., dt_0, dt_1, ...)
             reversed_history = self.interval_history[::-1]
             features = np.array([reversed_history]).reshape(1, -1)
             pred = xgb_model.predict(features)[0]
             return 'Not-Healthy' if pred == 1 else 'Healthy'
         else:
+            # Fallback to true state if no model loaded
             return self.state
 
+
+
+
+        # graphics for node
+        global graphics
+        if (graphics == 1):
+            global ax
+            ax.add_artist(plt.Circle((self.x, self.y), 2, fill=True, color='blue'))
+
+#
+# this function creates a packet (associated with a node)
+# it also sets all parameters, currently random
+#
 class myPacket():
     def __init__(self, nodeid, plen, distance):
         global experiment
@@ -298,26 +386,35 @@ class myPacket():
         self.nodeid = nodeid
         self.txpow = Ptx
 
+        # randomize configuration values
         self.sf = random.randint(6,12)
         self.cr = random.randint(1,4)
         self.bw = random.choice([125, 250, 500])
 
+        # for certain experiments override these
         if experiment==1 or experiment == 0:
             self.sf = 12
             self.cr = 4
             self.bw = 125
 
+        # for certain experiments override these
         if experiment==2:
             self.sf = 6
             self.cr = 1
             self.bw = 500
+        # lorawan
         if experiment == 4:
             self.sf = 12
             self.cr = 1
             self.bw = 125
 
-        Prx = self.txpow
-        Lpl = Lpld0 + 10*gamma*math.log(distance/d0)
+
+        # for experiment 3 find the best setting
+        # OBS, some hardcoded values
+        Prx = self.txpow  ## zero path loss by default
+
+        # log-shadow
+        Lpl = Lpld0 + 10*gamma*math.log10(distance/d0)
         print("Lpl:", Lpl)
         Prx = self.txpow - GL - Lpl
 
@@ -354,17 +451,22 @@ class myPacket():
             self.cr = 1
 
             if experiment == 5:
+                # reduce the txpower if there's room left
                 self.txpow = max(2, self.txpow - math.floor(Prx - minsensi))
                 Prx = self.txpow - GL - Lpl
                 print('minsesi {} best txpow {}'.format(minsensi, self.txpow))
 
+        # transmission range, needs update XXX
         self.transRange = 150
         self.pl = plen
         self.symTime = (2.0**self.sf)/self.bw
         self.arriveTime = 0
         self.rssi = Prx
+        # frequencies: lower bound + number of 61 Hz steps
         self.freq = 860000000 + random.randint(0,2622950)
 
+        # for certain experiments override these and
+        # choose some random frequences
         if experiment == 1:
             self.freq = random.choice([860000000, 864000000, 868000000])
         else:
@@ -374,38 +476,48 @@ class myPacket():
         print("bw", self.bw, "sf", self.sf, "cr", self.cr, "rssi", self.rssi)
         self.rectime = airtime(self.sf,self.cr,self.pl,self.bw)
         print("rectime node ", self.nodeid, "  ", self.rectime)
+        # denote if packet is collided
         self.collided = 0
         self.processed = 0
 
+#
+# main discrete event loop, runs for each node
+# a global list of packet being processed at the gateway
+# is maintained
+#
 def transmit(env,node):
-    global nrCollisions, nrReceived, nrProcessed, nrLost, nrDeferred, tp_class, tn_class, fp_class, fn_class
     while True:
+        # 1. State transition
         if node.state == 'Healthy':
             if random.random() < p_trans:
                 node.state = 'Not-Healthy'
-        else:
+        else: # node.state == 'Not-Healthy'
             if random.random() < q_trans:
                 node.state = 'Healthy'
 
-        # Schedule next interval based on true state
-        if node.state == 'Healthy':
+        # 2. Get lambda based on current predicted state (from the last event)
+        if node.predicted_state == 'Healthy':
             lam = 1.96
         else:
+            # Mixture of two Poisson distributions (74.3% chronic with rate 12.0, 25.7% acute with rate 2.72)
             if random.random() < 0.257:
                 lam = 2.72
             else:
                 lam = 12.0
 
+        # Calculate transmission interval in ms (units of daily measurements)
         interval = random.expovariate(lam / 86400000.0)
         yield env.timeout(interval)
 
-        # Update interval history and run classifier
+        # After waking up, update history with this interval and classify state
         node.interval_history.append(interval)
         if len(node.interval_history) > k_intervals:
             node.interval_history.pop(0)
             
         node.predicted_state = node.classify_state()
 
+        # Track classifier stats
+        global tp_class, tn_class, fp_class, fn_class
         if node.state == 'Not-Healthy' and node.predicted_state == 'Not-Healthy':
             tp_class += 1
         elif node.state == 'Healthy' and node.predicted_state == 'Healthy':
@@ -415,31 +527,30 @@ def transmit(env,node):
         elif node.state == 'Not-Healthy' and node.predicted_state == 'Healthy':
             fn_class += 1
 
-        # Plain LBT Mechanism (LBT on every packet for all nodes) with retry limit
-        max_retries = 3
-        retries = 0
-        dropped = False
-        while True:
-            channel_busy = False
-            for other in packetsAtBS:
-                # check if channel is occupied by ANY packet on colliding frequency
-                if frequencyCollision(node.packet, other.packet):
-                    channel_busy = True
+        # 3. LBT Mechanism (only for predicted Healthy nodes if LBT is enabled)
+        if use_lbt and node.predicted_state == 'Healthy':
+
+            while True:
+                channel_busy = False
+                for other in packetsAtBS:
+                    # check if channel is occupied by predicted Not-Healthy traffic on colliding frequency
+                    if other.predicted_state == 'Not-Healthy' and frequencyCollision(node.packet, other.packet):
+                        channel_busy = True
+                        break
+                if not channel_busy:
                     break
-            if not channel_busy:
-                break
-            else:
-                retries += 1
-                if retries > max_retries:
-                    dropped = True
-                    break
-                nrDeferred += 1
-                yield env.timeout(random.uniform(1000, 5000))
+                else:
+                    global nrDeferred
+                    nrDeferred += 1
+                    # Defer transmission: wait for random backoff time (1 to 5 seconds)
+                    yield env.timeout(random.uniform(1000, 5000))
+
+
+
+        # time sending and receiving
+        # packet arrives -> add to base station
 
         node.sent = node.sent + 1
-        if dropped:
-            nrLost += 1
-            continue
         if (node in packetsAtBS):
             print("ERROR: packet already in")
         else:
@@ -449,6 +560,7 @@ def transmit(env,node):
                 node.packet.lost = True
             else:
                 node.packet.lost = False
+                # adding packet if no collision
                 if (checkcollision(node.packet)==1):
                     node.packet.collided = 1
                 else:
@@ -459,19 +571,30 @@ def transmit(env,node):
         yield env.timeout(node.packet.rectime)
 
         if node.packet.lost:
+            global nrLost
             nrLost += 1
         if node.packet.collided == 1:
+            global nrCollisions
             nrCollisions = nrCollisions + 1
         if node.packet.collided == 0 and not node.packet.lost:
+            global nrReceived
             nrReceived = nrReceived + 1
         if node.packet.processed == 1:
+            global nrProcessed
             nrProcessed = nrProcessed + 1
 
+        # complete packet has been received by base station
+        # can remove it
         if (node in packetsAtBS):
             packetsAtBS.remove(node)
+            # reset the packet
         node.packet.collided = 0
         node.packet.processed = 0
         node.packet.lost = False
+
+#
+# "main" program
+#
 
 # get arguments
 if len(sys.argv) >= 5:
@@ -497,6 +620,8 @@ if len(sys.argv) >= 5:
             sys.exit(-1)
     if len(sys.argv) > 7:
         k_intervals = int(sys.argv[7])
+    if len(sys.argv) > 8:
+        use_lbt = bool(int(sys.argv[8]))
     print("Nodes:", nrNodes)
     print("AvgSendTime (exp. distributed):", avgSendTime)
     print("Experiment: ", experiment)
@@ -504,19 +629,38 @@ if len(sys.argv) >= 5:
     print("Full Collision: ", full_collision)
     print(f"Active Scenario: {scenario} (p = {p_trans}, q = {q_trans})")
     print(f"Features count (K-intervals): {k_intervals}")
+    print(f"LBT Enabled: {use_lbt}")
 
-    # Reload model with parsed parameters
-    load_xgboost_model()
+    # Reload model
+    model_file = os.path.join(os.path.dirname(__file__), "..", "..", "models", f"xgb_model_scenario{scenario}_k{k_intervals}.json")
+    xgb_model = xgb.XGBClassifier()
+    if os.path.exists(model_file):
+        xgb_model.load_model(model_file)
+        print(f"Loaded XGBoost model: {model_file}")
+    else:
+        print(f"Warning: Model file {model_file} not found. Running with true-state fallback.")
+        xgb_model = None
 else:
-    print("usage: ./loraDir <nodes> <avgsend> <experiment> <simtime> [collision] [scenario] [k_intervals]")
+    print("usage: ./loraDir <nodes> <avgsend> <experiment> <simtime> [collision] [scenario] [k_intervals] [use_lbt]")
+
+
+    print("experiment 0 and 1 use 1 frequency only")
     exit(-1)
 
+
+
+# global stuff
+#Rnd = random.seed(12345)
 nodes = []
 packetsAtBS = []
 env = simpy.Environment()
 
+# maximum number of packets the BS can receive at the same time
 maxBSReceives = 8
 
+
+# max distance: 300m in city, 3000 m outside (5 km Utz experiment)
+# also more unit-disc like according to Utz
 bsId = 1
 nrCollisions = 0
 nrReceived = 0
@@ -524,49 +668,76 @@ nrProcessed = 0
 nrLost = 0
 nrDeferred = 0
 
+# Classifier statistics
 tp_class = 0
 tn_class = 0
 fp_class = 0
 fn_class = 0
 
+
 Ptx = 14
 gamma = 2.08
 d0 = 40.0
-var = 0
+var = 0           # variance ignored for now
 Lpld0 = 127.41
 GL = 0
 
 sensi = np.array([sf7,sf8,sf9,sf10,sf11,sf12])
 if experiment in [0,1,4]:
-    minsensi = sensi[5,2]
+    minsensi = sensi[5,2]  # 5th row is SF12, 2nd column is BW125
 elif experiment == 2:
-    minsensi = -112.0
+    minsensi = -112.0   # no experiments, so value from datasheet
 elif experiment in [3,5]:
-    minsensi = np.amin(sensi)
+    minsensi = np.amin(sensi) ## Experiment 3 can use any setting, so take minimum
 Lpl = Ptx - minsensi
 print("amin", minsensi, "Lpl", Lpl)
 maxDist = d0*(math.e**((Lpl-Lpld0)/(10.0*gamma)))
 print("maxDist:", maxDist)
 
+# base station placement
 bsx = maxDist+10
 bsy = maxDist+10
 xmax = bsx + maxDist + 20
 ymax = bsy + maxDist + 20
 
+# prepare graphics and add sink
+if (graphics == 1):
+    plt.ion()
+    plt.figure()
+    ax = plt.gcf().gca()
+    # XXX should be base station position
+    ax.add_artist(plt.Circle((bsx, bsy), 3, fill=True, color='green'))
+    ax.add_artist(plt.Circle((bsx, bsy), maxDist, fill=False, color='green'))
+
+
 for i in range(0,nrNodes):
+    # myNode takes period (in ms), base station id packetlen (in Bytes)
+    # 1000000 = 16 min
     node = myNode(i,bsId, avgSendTime,20)
     nodes.append(node)
     env.process(transmit(env,node))
 
+#prepare show
+if (graphics == 1):
+    plt.xlim([0, xmax])
+    plt.ylim([0, ymax])
+    plt.draw()
+    plt.show()
+
+# start simulation
 env.run(until=simtime)
 
+# print stats and save into file
 print("nrCollisions ", nrCollisions)
 
-TX = [22, 22, 22, 23,
-      24, 24, 24, 25, 25, 25, 25, 26, 31, 32, 34, 35, 44,
-      82, 85, 90,
-      105, 115, 125]
-V = 3.0
+# compute energy
+# Transmit consumption in mA from -2 to +17 dBm
+TX = [22, 22, 22, 23,                                      # RFO/PA0: -2..1
+      24, 24, 24, 25, 25, 25, 25, 26, 31, 32, 34, 35, 44,  # PA_BOOST/PA1: 2..14
+      82, 85, 90,                                          # PA_BOOST/PA1: 15..17
+      105, 115, 125]                                       # PA_BOOST/PA1+PA2: 18..20
+# mA = 90    # current draw for TX = 17 dBm
+V = 3.0     # voltage XXX
 sent = sum(n.sent for n in nodes)
 energy = sum(node.packet.rectime * TX[int(node.packet.txpow)+2] * V * node.sent for node in nodes) / 1e6
 
@@ -578,11 +749,13 @@ print("processed packets: ", nrProcessed)
 print("lost packets: ", nrLost)
 print("deferred packets: ", nrDeferred)
 
+# data extraction rate
 der = (sent-nrCollisions)/float(sent) if sent > 0 else 0
 print("DER:", der)
 der = (nrReceived)/float(sent) if sent > 0 else 0
 print("DER method 2:", der)
 
+# Compute classifier metrics
 total_class = tp_class + tn_class + fp_class + fn_class
 sensitivity = tp_class / (tp_class + fn_class) if (tp_class + fn_class) > 0 else 0
 specificity = tn_class / (tn_class + fp_class) if (tn_class + fp_class) > 0 else 0
@@ -595,7 +768,14 @@ print(f"Specificity: {specificity:.4f}")
 print(f"Accuracy: {accuracy:.4f}")
 print("------------------------------")
 
-fname = os.path.join(os.path.dirname(__file__), "..", "Results_Data", "exp" + str(experiment) + ".dat")
+
+# this can be done to keep graphics visible
+if (graphics == 1):
+    input('Press Enter to continue ...')
+
+# save experiment data into a dat file that can be read by e.g. gnuplot
+# name of file would be:  exp0.dat for experiment 0
+fname = os.path.join(os.path.dirname(__file__), "..", "..", "Results_Data", "exp" + str(experiment) + ".dat")
 print(fname)
 if os.path.isfile(fname):
     res = "\n" + str(nrNodes) + " " + str(nrCollisions) + " "  + str(sent) + " " + str(energy)
@@ -604,3 +784,9 @@ else:
 with open(fname, "a") as myfile:
     myfile.write(res)
 myfile.close()
+
+# with open('nodes.txt','w') as nfile:
+#     for n in nodes:
+#         nfile.write("{} {} {}\n".format(n.x, n.y, n.nodeid))
+# with open('basestation.txt', 'w') as bfile:
+#     bfile.write("{} {} {}\n".format(bsx, bsy, 0))

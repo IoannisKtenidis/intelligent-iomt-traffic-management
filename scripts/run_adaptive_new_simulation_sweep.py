@@ -20,9 +20,9 @@ scenario_id = 1           # Scenario 1 (p=0.018, q=0.764)
 experiment_id = 3         # Adaptive SF setup
 
 scripts = {
-    "ALOHA": "../Core_Code/loraDir - ALOHA.py",
-    "Classifier_LBT_70": "../Core_Code/loraDir - Classifier LBT.py",
-    "Classifier_LBT_100": "../Core_Code/loraDir - Classifier LBT.py"
+    "ALOHA": "../src/core/lora_dir_aloha.py",
+    "Classifier_LBT_70": "../src/core/lora_dir_classifier_lbt.py",
+    "Classifier_LBT_100": "../src/core/lora_dir_classifier_lbt.py"
 }
 
 output_dir = "../Results_Data/adaptiveNEW"

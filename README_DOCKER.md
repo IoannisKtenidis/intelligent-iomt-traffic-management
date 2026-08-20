@@ -24,7 +24,7 @@ docker-compose build
 ## 3. Running Simulations
 
 ### Run the Default Script
-By default, running docker-compose will execute `Execution_Scripts/run_all_scenarios.py`:
+By default, running docker-compose will execute `scripts/run_all_scenarios.py`:
 
 ```bash
 docker-compose up
@@ -35,22 +35,22 @@ You can run any script by overriding the default command:
 
 #### Run Monte Carlo Simulation Sweep
 ```bash
-docker-compose run --rm simulator python Execution_Scripts/run_parallel_monte_carlo.py
+docker-compose run --rm simulator python scripts/run_parallel_monte_carlo.py
 ```
 
 #### Run Adaptive SF Sweep (up to 12000 Nodes)
 ```bash
-docker-compose run --rm simulator python Execution_Scripts/run_adaptiveNEW_simulation_sweep.py
+docker-compose run --rm simulator python scripts/run_adaptive_new_simulation_sweep.py
 ```
 
 #### Run SF12 Sweep (Ideal vs ML Classifier + LBT)
 ```bash
-docker-compose run --rm simulator python Execution_Scripts/run_sf12NEW_simulation_sweep.py
+docker-compose run --rm simulator python scripts/run_sf12_new_simulation_sweep.py
 ```
 
 #### Train the XGBoost Models
 ```bash
-docker-compose run --rm simulator python Core_Code/train_xgboost.py
+docker-compose run --rm simulator python src/core/train_xgboost.py
 ```
 
 ---

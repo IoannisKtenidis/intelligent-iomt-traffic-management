@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
- LoRaSim 0.2.1: simulate collisions in LoRa (ALOHA Configuration)
+ LoRaSim 0.2.1: simulate collisions in LoRa (Plain LBT Configuration)
 """
 
 import simpy
@@ -55,7 +55,7 @@ def load_xgboost_model():
     and K intervals. If the model file does not exist, falls back to the true state.
     """
     global xgb_model
-    model_file = os.path.join(os.path.dirname(__file__), f"xgb_model_scenario{scenario}_k{k_intervals}.json")
+    model_file = os.path.join(os.path.dirname(__file__), "..", "..", "models", f"xgb_model_scenario{scenario}_k{k_intervals}.json")
     xgb_model = xgb.XGBClassifier()
     if os.path.exists(model_file):
         xgb_model.load_model(model_file)
@@ -415,7 +415,31 @@ def transmit(env,node):
         elif node.state == 'Not-Healthy' and node.predicted_state == 'Healthy':
             fn_class += 1
 
+        # Plain LBT Mechanism (LBT on every packet for all nodes) with retry limit
+        max_retries = 3
+        retries = 0
+        dropped = False
+        while True:
+            channel_busy = False
+            for other in packetsAtBS:
+                # check if channel is occupied by ANY packet on colliding frequency
+                if frequencyCollision(node.packet, other.packet):
+                    channel_busy = True
+                    break
+            if not channel_busy:
+                break
+            else:
+                retries += 1
+                if retries > max_retries:
+                    dropped = True
+                    break
+                nrDeferred += 1
+                yield env.timeout(random.uniform(1000, 5000))
+
         node.sent = node.sent + 1
+        if dropped:
+            nrLost += 1
+            continue
         if (node in packetsAtBS):
             print("ERROR: packet already in")
         else:
@@ -571,7 +595,7 @@ print(f"Specificity: {specificity:.4f}")
 print(f"Accuracy: {accuracy:.4f}")
 print("------------------------------")
 
-fname = os.path.join(os.path.dirname(__file__), "..", "Results_Data", "exp" + str(experiment) + ".dat")
+fname = os.path.join(os.path.dirname(__file__), "..", "..", "Results_Data", "exp" + str(experiment) + ".dat")
 print(fname)
 if os.path.isfile(fname):
     res = "\n" + str(nrNodes) + " " + str(nrCollisions) + " "  + str(sent) + " " + str(energy)

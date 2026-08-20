@@ -12,7 +12,7 @@ collision = 0             # Simplified collision check
 scenario_id = 1           # Scenario 1 (p=0.018, q=0.764)
 k_intervals = 3           # K=3 feature window
 
-script_name = "../Core_Code/loraDir - Classifier LBT.py"
+script_name = "../src/core/lora_dir_classifier_lbt.py"
 
 def run_sim(nodes, experiment_id):
     cmd = [

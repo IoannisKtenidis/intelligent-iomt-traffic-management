@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
- LoRaSim 0.2.1: simulate collisions in LoRa (Classifier-Driven LBT Configuration)
+ LoRaSim 0.2.1: simulate collisions in LoRa (ALOHA Configuration)
 """
 
 import simpy
@@ -9,7 +9,6 @@ import random
 import numpy as np
 import math
 import sys
-import matplotlib.pyplot as plt
 import os
 
 # Mute verbose print statements to speed up execution
@@ -28,13 +27,6 @@ full_collision = False
 # Scenario Selection: 1, 2, or 3
 scenario = 1
 
-# Number of intervals to use as features (1, 2, 3, or 4)
-k_intervals = 3
-
-# Enable/disable Listen-Before-Talk (LBT) mechanism - True for Classifier LBT
-use_lbt = True
-
-
 if scenario == 1:
     p_trans = 0.018
     q_trans = 0.764
@@ -49,54 +41,30 @@ else:
     sys.exit(-1)
 
 print(f"Selected Scenario: {scenario} (p = {p_trans}, q = {q_trans})")
-print(f"Features count (K-intervals): {k_intervals}")
 
-# Custom fast XGBoost tree evaluator
-class FastXGB:
-    def __init__(self, json_path):
-        import json
-        with open(json_path, 'r') as f:
-            data = json.load(f)
-        trees_data = data['learner']['gradient_booster']['model']['trees']
-        self.trees = []
-        for t in trees_data:
-            self.trees.append({
-                'left': t['left_children'],
-                'right': t['right_children'],
-                'split_idx': t['split_indices'],
-                'split_cond': t['split_conditions'],
-            })
-            
-    def predict(self, x):
-        margin = 0.0
-        for t in self.trees:
-            left = t['left']
-            right = t['right']
-            split_idx = t['split_idx']
-            split_cond = t['split_cond']
-            
-            node = 0
-            while left[node] != -1:
-                feat = split_idx[node]
-                val = x[feat]
-                if val < split_cond[node]:
-                    node = left[node]
-                else:
-                    node = right[node]
-            margin += split_cond[node]
-        return 1 if margin > 0.0 else 0
+# Number of intervals to use as features (1, 2, 3, or 4)
+k_intervals = 3
 
-model_file = os.path.join(os.path.dirname(__file__), f"xgb_model_scenario{scenario}_k{k_intervals}.json")
+# Load XGBoost model
+import xgboost as xgb
 xgb_model = None
-if os.environ.get("FORCE_IDEAL_CLASSIFIER") == "1":
-    print("Forced true-state fallback (100% Accuracy) via environment variable.")
-elif os.path.exists(model_file):
-    xgb_model = FastXGB(model_file)
-    print(f"Loaded fast XGBoost evaluator from: {model_file}")
-else:
-    print(f"Warning: Model file {model_file} not found. Running with true-state fallback.")
 
+def load_xgboost_model():
+    """
+    Loads the XGBoost classifier from a JSON file based on the selected scenario
+    and K intervals. If the model file does not exist, falls back to the true state.
+    """
+    global xgb_model
+    model_file = os.path.join(os.path.dirname(__file__), "..", "..", "models", f"xgb_model_scenario{scenario}_k{k_intervals}.json")
+    xgb_model = xgb.XGBClassifier()
+    if os.path.exists(model_file):
+        xgb_model.load_model(model_file)
+        print(f"Loaded XGBoost model: {model_file}")
+    else:
+        print(f"Warning: Model file {model_file} not found. Running with true-state fallback.")
+        xgb_model = None
 
+load_xgboost_model()
 
 sf7 = np.array([7,-126.5,-124.25,-120.75])
 sf8 = np.array([8,-127.25,-126.75,-124.0])
@@ -311,11 +279,11 @@ class myNode():
         if xgb_model is not None:
             # Reverse interval history to match training feature order (newest first)
             reversed_history = self.interval_history[::-1]
-            pred = xgb_model.predict(reversed_history)
+            features = np.array([reversed_history]).reshape(1, -1)
+            pred = xgb_model.predict(features)[0]
             return 'Not-Healthy' if pred == 1 else 'Healthy'
         else:
             return self.state
-
 
 class myPacket():
     def __init__(self, nodeid, plen, distance):
@@ -338,11 +306,11 @@ class myPacket():
             self.sf = 12
             self.cr = 4
             self.bw = 125
-        # for certain experiments override these
+
         if experiment==2:
-            self.sf = 7
+            self.sf = 6
             self.cr = 1
-            self.bw = 125
+            self.bw = 500
         if experiment == 4:
             self.sf = 12
             self.cr = 1
@@ -419,6 +387,7 @@ def transmit(env,node):
             if random.random() < q_trans:
                 node.state = 'Healthy'
 
+        # Schedule next interval based on true state
         if node.state == 'Healthy':
             lam = 1.96
         else:
@@ -430,6 +399,7 @@ def transmit(env,node):
         interval = random.expovariate(lam / 86400000.0)
         yield env.timeout(interval)
 
+        # Update interval history and run classifier
         node.interval_history.append(interval)
         if len(node.interval_history) > k_intervals:
             node.interval_history.pop(0)
@@ -445,32 +415,7 @@ def transmit(env,node):
         elif node.state == 'Not-Healthy' and node.predicted_state == 'Healthy':
             fn_class += 1
 
-        # 3. LBT Mechanism (only for predicted Healthy nodes if LBT is enabled)
-        max_retries = 3
-        retries = 0
-        dropped = False
-        if use_lbt and node.predicted_state == 'Healthy':
-            while True:
-                channel_busy = False
-                for other in packetsAtBS:
-                    # check if channel is occupied by ANY traffic on colliding frequency
-                    if frequencyCollision(node.packet, other.packet):
-                        channel_busy = True
-                        break
-                if not channel_busy:
-                    break
-                else:
-                    retries += 1
-                    if retries > max_retries:
-                        dropped = True
-                        break
-                    nrDeferred += 1
-                    yield env.timeout(random.uniform(1000, 5000))
-
         node.sent = node.sent + 1
-        if dropped:
-            nrLost += 1
-            continue
         if (node in packetsAtBS):
             print("ERROR: packet already in")
         else:
@@ -536,16 +481,8 @@ if len(sys.argv) >= 5:
     print(f"Active Scenario: {scenario} (p = {p_trans}, q = {q_trans})")
     print(f"Features count (K-intervals): {k_intervals}")
 
-    # Reload model
-    model_file = os.path.join(os.path.dirname(__file__), f"xgb_model_scenario{scenario}_k{k_intervals}.json")
-    xgb_model = None
-    if os.environ.get("FORCE_IDEAL_CLASSIFIER") == "1":
-        print("Forced true-state fallback (100% Accuracy) via environment variable.")
-    elif os.path.exists(model_file):
-        xgb_model = FastXGB(model_file)
-        print(f"Loaded fast XGBoost evaluator from: {model_file}")
-    else:
-        print(f"Warning: Model file {model_file} not found. Running with true-state fallback.")
+    # Reload model with parsed parameters
+    load_xgboost_model()
 else:
     print("usage: ./loraDir <nodes> <avgsend> <experiment> <simtime> [collision] [scenario] [k_intervals]")
     exit(-1)
@@ -577,9 +514,9 @@ GL = 0
 
 sensi = np.array([sf7,sf8,sf9,sf10,sf11,sf12])
 if experiment in [0,1,4]:
-    minsensi = sensi[5,2]  # 5th row is SF12, 2nd column is BW125
+    minsensi = sensi[5,2]
 elif experiment == 2:
-    minsensi = sensi[5,2]  # Force area to be sized for SF12 (same as SN1 and SN3)
+    minsensi = -112.0
 elif experiment in [3,5]:
     minsensi = np.amin(sensi)
 Lpl = Ptx - minsensi
@@ -634,7 +571,7 @@ print(f"Specificity: {specificity:.4f}")
 print(f"Accuracy: {accuracy:.4f}")
 print("------------------------------")
 
-fname = os.path.join(os.path.dirname(__file__), "..", "Results_Data", "exp" + str(experiment) + ".dat")
+fname = os.path.join(os.path.dirname(__file__), "..", "..", "Results_Data", "exp" + str(experiment) + ".dat")
 print(fname)
 if os.path.isfile(fname):
     res = "\n" + str(nrNodes) + " " + str(nrCollisions) + " "  + str(sent) + " " + str(energy)

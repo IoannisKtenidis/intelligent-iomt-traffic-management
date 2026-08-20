@@ -1,13 +1,11 @@
 import subprocess
 import re
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
-import shutil
 
 # Simulation parameters
 node_counts = [500, 1000, 2000, 3000, 4000, 5000]
@@ -17,28 +15,22 @@ collision = 0             # Simplified collision check
 k_intervals = 3           # K=3 feature window
 iterations = 100          # 100 Monte Carlo runs per configuration
 scenario_id = 1           # Scenario 1 (p=0.018, q=0.764)
-experiment_id = 0         # Fixed SF12, CR=4/8, BW=125, single frequency
+experiment_id = 0         # Fixed SF12, CR=4/8, BW=125, single frequency (matches baseline)
 
 scripts = {
-    "ALOHA": "../Core_Code/loraDir - ALOHA.py",
-    "Classifier_LBT_70": "../Core_Code/loraDir - Classifier LBT.py",
-    "Classifier_LBT_100": "../Core_Code/loraDir - Classifier LBT.py"
+    "ALOHA": "../src/core/lora_dir_aloha.py",
+    "Plain_LBT": "../src/core/lora_dir_plain_lbt.py",
+    "Classifier_LBT": "../src/core/lora_dir_classifier_lbt.py"
 }
 
-output_dir = "../Results_Data/sf12NEW"
+output_dir = "../Results_Data/SF12"
 os.makedirs(output_dir, exist_ok=True)
 
 def run_single_sim(task):
-    approach, nodes, iter_idx = task
-    script_file = scripts[approach]
+    script_name, nodes, iter_idx = task
+    script_file = scripts[script_name]
     
-    # Set environment variables for the subprocess
-    env = os.environ.copy()
-    if approach == "Classifier_LBT_100":
-        env["FORCE_IDEAL_CLASSIFIER"] = "1"
-    else:
-        env["FORCE_IDEAL_CLASSIFIER"] = "0"
-
+    # CommandLine format: ./loraDir <nodes> <avgsend> <experiment> <simtime> [collision] [scenario] [k_intervals]
     cmd = [
         "python", script_file,
         str(nodes), str(avg_send), str(experiment_id), str(simtime),
@@ -46,7 +38,8 @@ def run_single_sim(task):
     ]
     
     try:
-        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, env=env)
+        # Run subprocess with timeout to prevent hang
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
         stdout = process.stdout
         
         # Parse DER method 2
@@ -59,28 +52,28 @@ def run_single_sim(task):
                 return float(der_match_1.group(1))
             return None
     except Exception as e:
-        print(f"Error running {script_file} (approach={approach}, nodes={nodes}, iter={iter_idx}): {e}")
+        print(f"Error running {script_file} (nodes={nodes}, iter={iter_idx}): {e}")
         return None
 
 def main():
     print("=====================================================================")
-    print(f"   LAUNCHING SF12 REAL SIMULATION Sweep (100 Iterations per Config)")
+    print(f"   LAUNCHING SF12 SIMULATION Sweep (100 Iterations per Config)")
     print("=====================================================================")
     
     tasks = []
     # Build list of all runs
-    for approach in scripts.keys():
+    for script_name in scripts.keys():
         for nodes in node_counts:
             for i in range(iterations):
-                tasks.append((approach, nodes, i))
+                tasks.append((script_name, nodes, i))
                         
     total_tasks = len(tasks)
     print(f"Total simulation runs to execute: {total_tasks}")
     
     # Run in parallel using ProcessPoolExecutor
     cpu_count = os.cpu_count() or 4
-    # Cap workers at 12 to prevent virtual memory paging/thrashing
-    max_workers = min(12, max(1, cpu_count - 2))
+    # Use max workers as requested (pc is good)
+    max_workers = max(1, cpu_count - 1)
     print(f"Running in parallel using {max_workers} CPU workers...")
     
     results_raw = []
@@ -92,19 +85,19 @@ def main():
         
         for future in as_completed(futures):
             task = futures[future]
-            approach, nodes, iter_idx = task
+            script_name, nodes, iter_idx = task
             der = future.result()
             
             completed += 1
             if der is not None:
                 results_raw.append({
-                    "Approach": approach,
+                    "Approach": script_name,
                     "Nodes": nodes,
                     "DER": der
                 })
             
             # Progress reporting
-            if completed % 50 == 0 or completed == total_tasks:
+            if completed % 20 == 0 or completed == total_tasks:
                 elapsed = time.time() - start_time
                 est_total = (elapsed / completed) * total_tasks
                 est_rem = est_total - elapsed
@@ -134,59 +127,44 @@ def main():
     
     # Generate Plots
     colors = {
-        "ALOHA": "#d9534f",               # Crimson Red
-        "Classifier_LBT_70": "#5cb85c",   # Emerald Green
-        "Classifier_LBT_100": "#0275d8"   # Royal Blue
+        "ALOHA": "#d9534f",        # Crimson Red
+        "Plain_LBT": "#0275d8",    # Royal Blue
+        "Classifier_LBT": "#5cb85c" # Emerald Green
     }
     
     labels = {
         "ALOHA": "Standard ALOHA",
-        "Classifier_LBT_70": "ML Classifier + LBT (Accuracy ~70%)",
-        "Classifier_LBT_100": '"Ideal" Classifier + LBT (Accuracy 100%)'
+        "Plain_LBT": "Plain LBT",
+        "Classifier_LBT": "Classifier-Driven LBT (Proposed)"
     }
     
     plt.figure(figsize=(9.5, 7))
-    for approach in ["ALOHA", "Classifier_LBT_70", "Classifier_LBT_100"]:
+    for approach in ["ALOHA", "Plain_LBT", "Classifier_LBT"]:
         if approach in df_pivot.columns:
             plt.plot(
                 df_pivot["Nodes"], df_pivot[approach], 
-                marker='^' if approach == "ALOHA" else 'o' if approach == "Classifier_LBT_70" else 's',
-                linestyle='--' if approach == "ALOHA" else '-.' if approach == "Classifier_LBT_70" else '-',
-                color=colors[approach], linewidth=2.5, markersize=9,
+                marker='o', linestyle='-' if approach == "Classifier_LBT" else '--',
+                color=colors[approach], linewidth=2.2, markersize=8,
                 label=labels[approach]
             )
             
-    plt.title('SF12 Configuration: ALOHA vs. ML Classifier + LBT vs. Ideal Classifier + LBT\nHome Scenario (Scenario 1, p=0.018, q=0.764)', fontsize=14, fontweight='bold', pad=15)
-    plt.xlabel('Number of End-Nodes', fontsize=13, labelpad=10)
-    plt.ylabel('Data Extraction Rate (DER Fraction)', fontsize=13, labelpad=10)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
+    plt.title(f'SF12 (Fixed SF12, CR 4/8, BW 125 kHz)\nPerformance Comparison in Remote Home Scenario (Scenario 1, p=0.018, q=0.764)', fontsize=12, fontweight='bold', pad=15)
+    plt.xlabel('Number of End-Nodes', fontsize=11, labelpad=10)
+    plt.ylabel('Data Extraction Rate (DER Fraction)', fontsize=11, labelpad=10)
     
     plt.grid(True, linestyle=':', alpha=0.6, color='#999999')
-    plt.legend(fontsize=12, loc='lower left')
+    plt.legend(fontsize=10.5, loc='lower left')
     
-    plt.ylim(0.5, 1.02)
+    plt.ylim(0.0, 1.05)
     plt.xlim(0, 5200)
     
+    # Style details
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
     
     plot_filename = os.path.join(output_dir, "fig_sf12_comparison.png")
     plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
     print(f"Saved plot: {plot_filename}")
-    
-    # Also save a copy in the root folder
-    root_plot_path = "../Figures/fig_"
-    shutil.copy(plot_filename, root_plot_path)
-    print(f"Saved copy in root folder: {root_plot_path}")
-    
-    # Copy to brain directory for artifact viewing
-    brain_dir = r"C:\Users\jokte\.gemini\antigravity\brain\3dc26943-42c0-4305-8918-827f1ca989c4"
-    if os.path.exists(brain_dir):
-        brain_plot_path = os.path.join(brain_dir, "fig_sf12_comparison.png")
-        shutil.copy(plot_filename, brain_plot_path)
-        print(f"Copied plot to brain directory: {brain_plot_path}")
-        
     plt.close()
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ for scenario_id, params in scenarios.items():
         })
         
     df = pd.DataFrame(data)
-    filename = os.path.join(os.path.dirname(__file__), f"dataset_scenario{scenario_id}.csv")
+    filename = os.path.join(os.path.dirname(__file__), "..", "..", "data", f"dataset_scenario{scenario_id}.csv")
     df.to_csv(filename, index=False)
     print(f"Saved {len(df)} samples to {filename}")
 print("Data collection complete!")

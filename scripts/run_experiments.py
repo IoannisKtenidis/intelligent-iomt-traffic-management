@@ -18,7 +18,7 @@ results = []
 def run_sim(nodes, lbt_enabled):
     lbt_flag = 1 if lbt_enabled else 0
     cmd = [
-        "python", "../Core_Code/loraDir - Hospital Scenario.py",
+        "python", "../src/core/lora_dir_hospital_scenario.py",
         str(nodes), str(avg_send), str(experiment), str(simtime),
         str(collision), str(scenario), str(k_intervals), str(lbt_flag)
     ]

@@ -13,7 +13,7 @@ feature_counts = [1, 2, 3, 4]
 results = []
 
 for scenario_id in scenarios:
-    filename = os.path.join(os.path.dirname(__file__), f"dataset_scenario{scenario_id}.csv")
+    filename = os.path.join(os.path.dirname(__file__), "..", "..", "data", f"dataset_scenario{scenario_id}.csv")
     if not os.path.exists(filename):
         print(f"Error: Dataset {filename} not found. Please run collect_data.py first.")
         continue
@@ -22,7 +22,7 @@ for scenario_id in scenarios:
     print(f"Training and Evaluating Models for Scenario {scenario_id}")
     print(f"==================================================")
     
-    df = pd.read_csv(os.path.join(os.path.dirname(__file__), filename))
+    df = pd.read_csv(filename)
     
     # Check class distribution
     class_counts = df['label'].value_counts()
@@ -83,7 +83,7 @@ for scenario_id in scenarios:
         
         # Save model
         model_name = f"xgb_model_scenario{scenario_id}_k{k}.json"
-        model.save_model(os.path.join(os.path.dirname(__file__), model_name))
+        model.save_model(os.path.join(os.path.dirname(__file__), "..", "..", "models", model_name))
         print(f"Saved model to {model_name}")
 
 # Print a final summary table
@@ -92,5 +92,5 @@ print("FINAL SUMMARY COMPARISON TABLE")
 print("==================================================================")
 summary_df = pd.DataFrame(results)
 print(summary_df.to_string(index=False))
-summary_df.to_csv(os.path.join(os.path.dirname(__file__), "xgboost_metrics_summary.csv"), index=False)
+summary_df.to_csv(os.path.join(os.path.dirname(__file__), "..", "..", "Results_Data", "xgboost_metrics_summary.csv"), index=False)
 print("Summary saved to xgboost_metrics_summary.csv")
